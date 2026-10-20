@@ -1,0 +1,21 @@
+---
+- name: Test the Docker block without application secrets
+  hosts: docker_hosts
+  become: true
+  tasks:
+    - name: Install only Docker and configure logging  # noqa: role-name[path] -- Test this checkout directly.
+      ansible.builtin.import_role:
+        name: "{{ playbook_dir }}/.."
+        tasks_from: docker
+
+- name: Test the complete application deployment
+  hosts: docker_hosts
+  become: true
+  vars:
+    # Только для отдельной тестовой VM, не для prod/staging.
+    docker_app_postgres_password: test-only-password
+  roles:
+    - role: "{{ playbook_dir }}/.."  # noqa: role-name[path] -- Test this checkout directly.
+  tasks:
+    - name: Verify the deployed host
+      ansible.builtin.import_tasks: verify.yml

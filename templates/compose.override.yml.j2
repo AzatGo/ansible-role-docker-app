@@ -1,0 +1,16 @@
+# Managed by Ansible. Requires Docker Compose >= 2.24.4.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "{{ docker_app_log_max_size }}"
+    max-file: "{{ docker_app_log_max_files }}"
+
+services:
+  app:
+    # Replace the upstream port mapping instead of adding a second port.
+    ports: !override
+      - "{{ docker_app_bind_address }}:{{ docker_app_port }}:8000"
+    logging: *logging
+    stop_grace_period: "{{ docker_app_stop_timeout }}s"
+  db:
+    logging: *logging

@@ -1,0 +1,14 @@
+.idea/
+.venv/
+.cache/
+.ansible/
+__pycache__/
+.pytest_cache/
+*.tar.gz
+*.retry
+*.log
+app.env
+inventory.local.yml
+vars.local.yml
+tests/inventory.local.yml
+.vault-pass*

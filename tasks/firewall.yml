@@ -1,0 +1,62 @@
+---
+- name: Check firewall ports
+  ansible.builtin.assert:
+    that:
+      - docker_app_port | int > 0
+      - docker_app_port | int <= 65535
+      - docker_app_ssh_port | int > 0
+      - docker_app_ssh_port | int <= 65535
+      - docker_app_port | int != docker_app_ssh_port | int
+
+- name: Read Docker firewall configuration
+  ansible.builtin.slurp:
+    src: /etc/docker/daemon.json
+  register: docker_app_firewall_daemon
+
+- name: Require Docker iptables support
+  ansible.builtin.assert:
+    that:
+      - docker_app_firewall_config.get('firewall-backend', 'iptables') == 'iptables'
+      - docker_app_firewall_config.get('iptables', true) | bool
+      - docker_app_firewall_config.get('ip6tables', true) | bool
+    fail_msg: Enable the Docker iptables backend before applying these rules.
+  vars:
+    docker_app_firewall_config: "{{ docker_app_firewall_daemon.content | b64decode | from_json }}"
+
+- name: Install iptables
+  ansible.builtin.apt:
+    name: iptables
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install firewall script
+  ansible.builtin.template:
+    src: firewall.sh.j2
+    dest: /usr/local/sbin/docker-app-firewall
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /bin/sh -n %s
+
+- name: Create Docker systemd override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    mode: "0755"
+
+- name: Apply firewall after every Docker start
+  ansible.builtin.copy:
+    content: |
+      [Service]
+      ExecStartPost=/usr/local/sbin/docker-app-firewall
+    dest: /etc/systemd/system/docker.service.d/firewall.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd configuration
+
+- name: Apply firewall rules
+  ansible.builtin.command: /usr/local/sbin/docker-app-firewall
+  register: docker_app_firewall_result
+  changed_when: "'rules changed' in docker_app_firewall_result.stdout"

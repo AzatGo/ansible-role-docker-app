@@ -1,0 +1,32 @@
+---
+- name: Check daily cleanup schedule
+  ansible.builtin.assert:
+    that:
+      - docker_app_prune_hour | string is match('^[0-9]{1,2}$')
+      - docker_app_prune_hour | int >= 0
+      - docker_app_prune_hour | int <= 23
+      - docker_app_prune_minute | string is match('^[0-9]{1,2}$')
+      - docker_app_prune_minute | int >= 0
+      - docker_app_prune_minute | int <= 59
+
+- name: Install cron
+  ansible.builtin.apt:
+    name: cron
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Enable cron
+  ansible.builtin.systemd_service:
+    name: cron
+    enabled: true
+    state: started
+
+- name: Remove unused Docker resources daily
+  ansible.builtin.cron:
+    name: Docker system prune
+    cron_file: docker-system-prune
+    user: root
+    hour: "{{ docker_app_prune_hour }}"
+    minute: "{{ docker_app_prune_minute }}"
+    job: /usr/bin/docker system prune -f

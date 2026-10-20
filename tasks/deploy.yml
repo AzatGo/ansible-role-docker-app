@@ -1,0 +1,140 @@
+---
+- name: Check application settings
+  ansible.builtin.assert:
+    that:
+      - docker_app_project_name is match('^[a-z0-9][a-z0-9_-]*$')
+      - docker_app_postgres_db is match('^[a-z_][a-z0-9_]*$')
+      - docker_app_postgres_user is match('^[a-z_][a-z0-9_]*$')
+      - docker_app_shutdown_delay | int >= 0
+      - docker_app_db_connect_timeout | int > 0
+      - docker_app_stop_timeout | int > 60 + docker_app_shutdown_delay | int
+      - docker_app_wait_timeout | int > 0
+
+- name: Require a database password
+  ansible.builtin.assert:
+    that:
+      - docker_app_postgres_password is string
+      - docker_app_postgres_password | length > 0
+      - docker_app_postgres_password == docker_app_postgres_password | trim
+      - "'\n' not in docker_app_postgres_password"
+      - "'\r' not in docker_app_postgres_password"
+    fail_msg: Set docker_app_postgres_password in the inventory Vault file.
+  no_log: true
+
+- name: Create local source directory
+  ansible.builtin.file:
+    path: "{{ docker_app_source_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Download the application on the Ansible controller
+  ansible.builtin.git:
+    repo: "{{ docker_app_repo_url }}"
+    dest: "{{ docker_app_source_dir }}"
+    version: "{{ docker_app_repo_version }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Create project directory
+  ansible.builtin.file:
+    path: "{{ docker_app_project_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Copy original project files
+  ansible.builtin.copy:
+    src: "{{ docker_app_source_dir }}/{{ item }}"
+    dest: "{{ docker_app_project_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+  loop:
+    - Dockerfile
+    - .dockerignore
+    - requirements.txt
+    - docker-compose.yml
+    - app/
+  register: docker_app_project_files
+
+- name: Write project environment
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ docker_app_project_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  diff: false
+
+- name: Write Compose deployment settings
+  ansible.builtin.template:
+    src: compose.override.yml.j2
+    dest: "{{ docker_app_project_dir }}/compose.override.yml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Check Compose version
+  ansible.builtin.command: docker compose version --short
+  register: docker_app_compose_version
+  changed_when: false
+  check_mode: false
+
+- name: Require Compose with port override support
+  ansible.builtin.assert:
+    that:
+      - docker_app_compose_version.stdout | regex_replace('^v', '') is version('2.24.4', '>=')
+    fail_msg: Upgrade docker-compose-plugin to version 2.24.4 or newer.
+
+- name: Validate Compose configuration before removing legacy containers
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --project-name
+      - "{{ docker_app_project_name }}"
+      - --file
+      - docker-compose.yml
+      - --file
+      - compose.override.yml
+      - config
+      - --quiet
+    chdir: "{{ docker_app_project_dir }}"
+  changed_when: false
+
+- name: Install the dependency for legacy container management
+  ansible.builtin.apt:
+    name: python3-requests
+    state: present
+  when: docker_app_legacy_containers | length > 0
+
+- name: Remove explicitly listed legacy containers
+  community.docker.docker_container:
+    name: "{{ item }}"
+    state: absent
+    stop_timeout: "{{ docker_app_stop_timeout }}"
+    keep_volumes: true
+  loop: "{{ docker_app_legacy_containers }}"
+
+- name: Start or update the project and remove its orphan containers
+  community.docker.docker_compose_v2:
+    project_src: "{{ docker_app_project_dir }}"
+    project_name: "{{ docker_app_project_name }}"
+    files:
+      - docker-compose.yml
+      - compose.override.yml
+    state: present
+    build: "{{ docker_app_project_files.changed | ternary('always', 'policy') }}"
+    pull: missing
+    remove_orphans: true
+    recreate: auto
+    wait: true
+    wait_timeout: "{{ docker_app_wait_timeout }}"
+    timeout: "{{ docker_app_stop_timeout }}"

@@ -1,0 +1,50 @@
+#!/bin/sh
+# Managed by Ansible. This host is dedicated to the Compose application.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+for tool in iptables ip6tables; do
+    protocol=icmp
+    dhcp_server=67
+    dhcp_client=68
+    if [ "$tool" = ip6tables ]; then
+        [ -f /proc/net/if_inet6 ] || continue
+        protocol=ipv6-icmp
+        dhcp_server=547
+        dhcp_client=546
+    fi
+
+    before=$("$tool" -w -S)
+    "$tool" -w -S DOCKER-USER >/dev/null 2>&1 || "$tool" -w -N DOCKER-USER
+
+    # Only replace our own chains. Each restore commits the rules atomically.
+    "$tool-restore" --wait --noflush <<RULES
+*filter
+:APP-INPUT - [0:0]
+:APP-FORWARD - [0:0]
+-F APP-INPUT
+-F APP-FORWARD
+-A APP-INPUT -i lo -j ACCEPT
+-A APP-INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A APP-INPUT -p $protocol -j ACCEPT
+-A APP-INPUT -p udp --sport $dhcp_server --dport $dhcp_client -j ACCEPT
+-A APP-INPUT -p tcp --dport {{ docker_app_ssh_port | int }} -j ACCEPT
+-A APP-INPUT -p tcp --dport {{ docker_app_port | int }} -j ACCEPT
+-A APP-INPUT -j DROP
+-A APP-FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+-A APP-FORWARD -i docker0 -j RETURN
+-A APP-FORWARD -i br+ -j RETURN
+-A APP-FORWARD -p tcp -m conntrack --ctstate DNAT --ctdir ORIGINAL --ctorigdstport {{ docker_app_port | int }} -j RETURN
+-A APP-FORWARD -j DROP
+COMMIT
+RULES
+
+    "$tool" -w -C INPUT -j APP-INPUT >/dev/null 2>&1 || "$tool" -w -I INPUT 1 -j APP-INPUT
+    "$tool" -w -C DOCKER-USER -j APP-FORWARD >/dev/null 2>&1 || "$tool" -w -I DOCKER-USER 1 -j APP-FORWARD
+    "$tool" -w -C FORWARD -j DOCKER-USER >/dev/null 2>&1 || "$tool" -w -I FORWARD 1 -j DOCKER-USER
+
+    after=$("$tool" -w -S)
+    if [ "$before" != "$after" ]; then
+        echo "$tool rules changed"
+    fi
+done

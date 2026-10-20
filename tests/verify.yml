@@ -1,0 +1,83 @@
+---
+- name: Read service state
+  ansible.builtin.service_facts:
+
+- name: Verify Docker and cron are running and enabled
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.services['docker.service'].state == 'running'
+      - ansible_facts.services['docker.service'].status == 'enabled'
+      - ansible_facts.services['cron.service'].state == 'running'
+      - ansible_facts.services['cron.service'].status == 'enabled'
+
+- name: Check the Compose plugin
+  ansible.builtin.command: docker compose version --short
+  register: docker_app_test_compose
+  changed_when: false
+
+- name: Read Docker daemon configuration
+  ansible.builtin.slurp:
+    src: /etc/docker/daemon.json
+  register: docker_app_test_daemon
+
+- name: Verify Compose and JSON log rotation
+  ansible.builtin.assert:
+    that:
+      - docker_app_test_compose.stdout | regex_replace('^v', '') is version('2.24.4', '>=')
+      - docker_app_test_config['log-driver'] == 'json-file'
+      - docker_app_test_config['log-opts']['max-size'] == docker_app_log_max_size | string
+      - docker_app_test_config['log-opts']['max-file'] == docker_app_log_max_files | string
+  vars:
+    docker_app_test_config: "{{ docker_app_test_daemon.content | b64decode | from_json }}"
+
+- name: Inspect the environment file without reading secrets
+  ansible.builtin.stat:
+    path: "{{ docker_app_project_dir }}/.env"
+  register: docker_app_test_env
+
+- name: Verify environment file permissions
+  ansible.builtin.assert:
+    that:
+      - docker_app_test_env.stat.exists
+      - docker_app_test_env.stat.isreg
+      - docker_app_test_env.stat.uid == 0
+      - docker_app_test_env.stat.mode == '0600'
+
+- name: Read the cleanup schedule
+  ansible.builtin.slurp:
+    src: /etc/cron.d/docker-system-prune
+  register: docker_app_test_cron
+
+- name: Verify the daily cleanup command
+  ansible.builtin.assert:
+    that:
+      - docker_app_test_cron_line in docker_app_test_cron.content | b64decode
+  vars:
+    docker_app_test_cron_line: >-
+      {{ docker_app_prune_minute }} {{ docker_app_prune_hour }} * * * root /usr/bin/docker system prune -f
+
+- name: Verify firewall hooks for host and container traffic
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  loop:
+    - [iptables, -C, INPUT, -j, APP-INPUT]
+    - [iptables, -C, FORWARD, -j, DOCKER-USER]
+    - [iptables, -C, DOCKER-USER, -j, APP-FORWARD]
+  changed_when: false
+
+- name: Verify application and database readiness from the controller
+  ansible.builtin.uri:
+    url: "http://{{ ansible_host | default(inventory_hostname) }}:{{ docker_app_port }}/readyz"
+    status_code: 200
+    use_proxy: false
+  register: docker_app_test_ready
+  until: docker_app_test_ready.status == 200
+  retries: 6
+  delay: 5
+  delegate_to: localhost
+  become: false
+
+- name: Verify the application can reach PostgreSQL
+  ansible.builtin.assert:
+    that:
+      - docker_app_test_ready.json.database == 'ok'
